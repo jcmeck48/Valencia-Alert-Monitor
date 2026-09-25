@@ -1,0 +1,6 @@
+# Real configs hold the Slack token, RMS password and heartbeat URL - never commit them.
+config.json
+# Runtime files
+*.log
+state-*.json
+map-*.png

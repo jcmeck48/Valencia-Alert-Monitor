@@ -1,0 +1,25 @@
+{
+    "SiteName":  "Valencia",
+    "RmsBaseUrl":  "http://10.236.101.FIX_ME",
+    "Username":  "ADMIN",
+    "Password":  "PASTE_RMS_PASSWORD",
+    "Slack":  {
+                  "BotToken":  "xoxb-PASTE_BOT_TOKEN",
+                  "ChannelId":  "C07NK1HFQHK"
+              },
+    "ThresholdMinutes":  20,
+    "PollSeconds":  60,
+    "LookbackDays":  7,
+    "OfflineAlertAfterFailures":  10,
+    "MapSnapshot":  {
+                        "Enabled":  true,
+                        "MapPath":  "/static/mantis/#/monitor/map",
+                        "SettleSeconds":  12,
+                        "DebugPort":  9333,
+                        "Width":  1920,
+                        "Height":  1080
+                    },
+    "Heartbeat":  {
+                      "PingUrl":  "https://hc-ping.com/PASTE_CHECK_UUID"
+                  }
+}
