@@ -42,7 +42,10 @@ $friendly = @{
 function Get-Friendly($key) {
     if (-not $key) { return '' }
     if ($friendly.ContainsKey($key)) { return $friendly[$key] }
-    return ($key -replace '^lang\.rms\.(monitor|fed)\.', '')
+    $short = $key -replace '^lang\.rms\.(monitor|fed)\.', ''
+    if ($short -match '(?i)dmp')                    { return "DMP device alarm ($short) - possible physical E-stop" }
+    if ($short -match '(?i)emergenc|e-?stop|\.stop') { return "Emergency stop ($short)" }
+    return $short
 }
 
 # ---------------------------------------------------------------------------
@@ -82,10 +85,24 @@ function Connect-Rms {
     Write-Log 'Logged in to RMS'
 }
 
+# Serious alarms can be filed under different event groups (e.g. DMP / physical E-stops at some sites),
+# so ask for each group and merge by id. Override with "EventGroups": [2] in config if needed.
 function Get-SeriousEvents([string]$faultStatus) {
+    $groups = @(1, 2, 3)
+    if ($cfg.EventGroups) { $groups = @($cfg.EventGroups) }
+    $byId = [ordered]@{}
+    foreach ($g in $groups) {
+        foreach ($ev in (Get-SeriousEventsForGroup $faultStatus $g)) {
+            if ($ev -and -not $byId.Contains([string]$ev.id)) { $byId[[string]$ev.id] = $ev }
+        }
+    }
+    return @($byId.Values | Sort-Object { [int64]$_.createTimeL } -Descending)
+}
+
+function Get-SeriousEventsForGroup([string]$faultStatus, $eventGroup) {
     $now  = Get-Date
     $body = @{
-        eventGroup  = 2
+        eventGroup  = $eventGroup
         eventType   = ''
         eventLevel  = 3            # Serious
         faultStatus = $faultStatus # 0 = unprocessed, 1 = processed
@@ -142,11 +159,81 @@ function Send-SlackImage([string]$text, [string]$path) {
     if (-not $c.ok) { throw "Slack completeUpload failed: $($c.error)" }
 }
 
-function New-MapSnapshot([string]$outFile) {
-    $m = $cfg.MapSnapshot
-    Get-RmsMapSnapshot -BaseUrl $base -Username $cfg.Username -Password $cfg.Password -OutFile $outFile `
-        -WorkDir $PSScriptRoot -MapPath $m.MapPath -SettleSeconds $m.SettleSeconds -Port $m.DebugPort `
-        -Width $m.Width -Height $m.Height
+$script:BrowserOpts = @{
+    BaseUrl       = $base
+    Username      = $cfg.Username
+    Password      = $cfg.Password
+    MapPath       = $cfg.MapSnapshot.MapPath
+    SettleSeconds = $cfg.MapSnapshot.SettleSeconds
+    Width         = $cfg.MapSnapshot.Width
+    Height        = $cfg.MapSnapshot.Height
+}
+
+function New-MapSnapshot([string]$outFile) { Save-RmsMapScreenshot $script:BrowserOpts $outFile }
+
+# ---------------------------------------------------------------------------
+# Floor / system E-stop watcher. Some E-stops (e.g. physical floor buttons) never appear in the RMS
+# alarm list - they only switch the map's systemState to STOP. Read it from the hidden map page.
+# ---------------------------------------------------------------------------
+$script:stopSince      = $null
+$script:stateFailCount = 0
+$script:stateWarnSent  = $false
+$script:lastStateTry   = $null
+
+function Watch-SystemStop($alerted, $open, [datetime]$now) {
+    if (-not ($cfg.SystemStopWatch -and $cfg.SystemStopWatch.Enabled)) { return }
+    # After a few failures in a row, only retry every 5 minutes so the RMS alarm checks stay on schedule
+    if ($script:stateFailCount -ge 3 -and $script:lastStateTry -and ($now - $script:lastStateTry).TotalMinutes -lt 5) { return }
+    $script:lastStateTry = $now
+    try {
+        $ss = Get-RmsSystemState $script:BrowserOpts
+    } catch {
+        $script:stateFailCount++
+        Write-Log "System-state check failed ($($script:stateFailCount)): $($_.Exception.Message)"
+        try { Stop-RmsBrowser } catch {}
+        if ($script:stateFailCount -ge $cfg.OfflineAlertAfterFailures -and -not $script:stateWarnSent) {
+            try {
+                Send-Slack ":warning: Alarm monitor for $($cfg.SiteName) cannot read the RMS system state - *floor E-stops are NOT being checked* (RMS alarm alerts still work). Last error: $($_.Exception.Message)"
+                $script:stateWarnSent = $true
+            } catch { Write-Log "Slack send failed: $($_.Exception.Message)" }
+        }
+        return
+    }
+    if ($script:stateWarnSent) {
+        try { Send-Slack ":large_green_circle: Alarm monitor for $($cfg.SiteName) can read the RMS system state again - floor E-stops are being checked." } catch {}
+        $script:stateWarnSent = $false
+    }
+    $script:stateFailCount = 0
+
+    if ($ss.state -eq 'STOP') {
+        if (-not $script:stopSince) { $script:stopSince = $now; Write-Log 'System state is STOP (emergency stop engaged)' }
+        # A stop pressed from the RMS screen also shows up as a Serious alarm - that path already alerts
+        $coveredByAlarm = @($open | Where-Object { $_.eventContent -match '(?i)stop' }).Count -gt 0
+        $age = $now - $script:stopSince
+        if (-not $alerted.ContainsKey('sysstop') -and -not $coveredByAlarm -and $age.TotalMinutes -ge $cfg.ThresholdMinutes) {
+            $msg = ":rotating_light: *SYSTEM EMERGENCY STOP - $($cfg.SiteName)*`n" +
+                   "*RMS is in system emergency stop state* (floor / device E-stop)`n" +
+                   "Stopped for $(Format-Duration $age) - since $($script:stopSince.ToString('h:mm tt'))`n" +
+                   "RMS: $base"
+            $null = Send-Alert $msg
+            $alerted['sysstop'] = [pscustomobject]@{ started = (Get-EpochMs $script:stopSince); what = 'System emergency stop'; obj = 'system' }
+            Save-State $alerted
+            Write-Log "ALERT sent for system emergency stop, age $(Format-Duration $age)"
+        }
+    } else {
+        if ($script:stopSince) { Write-Log "System state is $($ss.state) again" }
+        $script:stopSince = $null
+        if ($alerted.ContainsKey('sysstop')) {
+            $started = ConvertFrom-EpochMs $alerted['sysstop'].started
+            $msg = ":white_check_mark: *RESOLVED - $($cfg.SiteName)*`n" +
+                   "*System emergency stop released* - RMS is $($ss.state)`n" +
+                   "Recovered at $($now.ToString('h:mm tt')) - total down $(Format-Duration ($now - $started))"
+            Send-Slack $msg
+            $alerted.Remove('sysstop')
+            Save-State $alerted
+            Write-Log 'RESOLVED sent for system emergency stop'
+        }
+    }
 }
 
 # Alert text always goes out; the screenshot is a best-effort extra
@@ -197,7 +284,7 @@ function Save-State($state) { if ($TestOnce) { return }; $state | ConvertTo-Json
 if ($TestSnapshot) {
     $out = Join-Path $PSScriptRoot 'map-test.png'
     Write-Log 'TEST: taking map screenshot (can take ~30-60 s)...'
-    New-MapSnapshot $out | Out-Null
+    try { New-MapSnapshot $out | Out-Null } finally { Stop-RmsBrowser }
     Write-Log "TEST: saved $out"
     exit 0
 }
@@ -206,6 +293,7 @@ if ($TestSlack) {
     Write-Log 'TEST: posting a test message with map to Slack...'
     $withImage = Send-Alert (":test_tube: *TEST - $($cfg.SiteName) alarm monitor*`n" +
                 "This is a test post. Serious alarms unprocessed for $($cfg.ThresholdMinutes)+ min will look like this, with a live map.")
+    Stop-RmsBrowser
     if ($withImage) { Write-Log 'TEST: posted with map image - check the channel'; exit 0 }
     Write-Log 'TEST: posted TEXT ONLY - map image failed (see lines above)'
     exit 2
@@ -245,7 +333,7 @@ while ($true) {
 
         # Anything we alerted on that is no longer unprocessed -> resolved
         foreach ($id in @($alerted.Keys)) {
-            if ($openIds.ContainsKey($id)) { continue }
+            if ($id -eq 'sysstop' -or $openIds.ContainsKey($id)) { continue }   # sysstop is handled by Watch-SystemStop
             $info     = $alerted[$id]
             $started  = ConvertFrom-EpochMs $info.started
             $finished = $null
@@ -261,6 +349,8 @@ while ($true) {
             Write-Log "RESOLVED sent for id=$id"
         }
 
+        Watch-SystemStop $alerted $open $now
+
         if ($offlineSent) {
             Send-Slack ":large_green_circle: Alarm monitor for $($cfg.SiteName) is reconnected to RMS."
             $offlineSent = $false
@@ -274,6 +364,11 @@ while ($true) {
                 Write-Log ("TEST: processed id={0}  {1}  obj={2}  {3} -> {4}" -f $ev.id, (Get-Friendly $ev.eventContent), $ev.eventObj,
                     (ConvertFrom-EpochMs $ev.createTimeL), (ConvertFrom-EpochMs $ev.finishTimeL))
             }
+            if ($cfg.SystemStopWatch -and $cfg.SystemStopWatch.Enabled) {
+                if ($script:stateFailCount -gt 0) { Write-Log 'TEST: system state NOT readable (see error above) - floor E-stops would not be detected'; Stop-RmsBrowser; exit 3 }
+                Write-Log ("TEST: system state = {0}" -f $(if ($script:stopSince) { 'STOP (emergency stop engaged)' } else { 'running (no emergency stop)' }))
+            }
+            Stop-RmsBrowser
             break
         }
     }

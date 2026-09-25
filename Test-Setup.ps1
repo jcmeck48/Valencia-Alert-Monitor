@@ -43,8 +43,18 @@ else { Add-Result 'Network' 'FAIL' "cannot reach $($uri.Host):$port from this PC
 
 # 4. RMS login + alarm read
 Write-Host "`n  Logging in and reading alarms..." -ForegroundColor Cyan
-if ((Invoke-MonitorTest '-TestOnce') -eq 0) { Add-Result 'RMS login + alarms' 'PASS' 'logged in and read Serious alarms (see list above)' }
-else { Add-Result 'RMS login + alarms' 'FAIL' 'see ERROR line above (wrong login, or different RMS version)'; exit 1 }
+switch (Invoke-MonitorTest '-TestOnce') {
+    0 {
+        Add-Result 'RMS login + alarms' 'PASS' 'logged in and read Serious alarms (see list above)'
+        if ($cfg.SystemStopWatch.Enabled) { Add-Result 'Floor E-stop watch' 'PASS' 'read the RMS system state from the map page' }
+        else { Add-Result 'Floor E-stop watch' 'SKIP' 'SystemStopWatch.Enabled is false' }
+    }
+    3 {
+        Add-Result 'RMS login + alarms' 'PASS' 'logged in and read Serious alarms (see list above)'
+        Add-Result 'Floor E-stop watch' 'FAIL' 'could not read the system state from the map page (see error above) - floor E-stops would be missed'
+    }
+    default { Add-Result 'RMS login + alarms' 'FAIL' 'see ERROR line above (wrong login, or different RMS version)'; exit 1 }
+}
 
 # 5. Map screenshot
 Write-Host "`n  Taking map screenshot (up to ~60 s)..." -ForegroundColor Cyan

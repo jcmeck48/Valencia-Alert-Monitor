@@ -4,6 +4,7 @@ Watches the Geek+ RMS at **http://10.236.101.? (see config)** and posts to Slack
 
 - :rotating_light: **Alert** when a *Serious* alarm (e.g. a system emergency stop) stays **Unprocessed for 20+ minutes**, with a live screenshot of the RMS map attached
 - :white_check_mark: **Resolved** when that same alarm is processed, with total downtime
+- :rotating_light: **System emergency stop** (e.g. a physical floor E-stop) held **20+ minutes**, even when the RMS doesn't log it as an alarm - read live from the RMS map's system state - plus a **Resolved** when it's released
 - :warning: **Monitor offline** if it can't reach the RMS for 10 minutes (and a follow-up when it reconnects)
 
 It checks once a minute, runs in the background as a Windows Scheduled Task, starts automatically at boot, and restarts itself if it crashes. No one needs to be logged in.
@@ -41,7 +42,7 @@ Created while running: `monitor-Valencia.log` (activity log), `state-Valencia.js
    ```
    This posts **one** test message to the channel. Use `-SkipSlack` on the end to skip that.
 
-5. **Install** once every step shows PASS (a WARN on "Background task" is expected before installing):
+5. **Install** once every step shows PASS (a WARN on "Background task" is expected before installing). It asks for a **Windows account and password** to run as — use the hub PC's normal account (not SYSTEM: the hidden Edge window for floor E-stops and map images won't run under SYSTEM):
    ```
    powershell -NoProfile -ExecutionPolicy Bypass -File .\Install-Monitor.ps1
    ```
@@ -99,6 +100,7 @@ Keep numbers without quotes and don't delete commas — if `config.json` breaks,
 - **Log shows `not_in_channel` / `channel_not_found`** → invite the bot to the channel; check `ChannelId`.
 - **Log shows `RMS login failed`** → check `Username` / `Password` in `config.json`.
 - **Alerts arrive without the map image, but `Test-Setup` screenshot passed** → the hidden Edge window may not render under the background (SYSTEM) account on this PC; ask for the monitor to be switched to run as the logged-in user.
+- **Log shows `System-state check failed`** → the hidden Edge window can't read the RMS map; RMS alarm alerts still work, but floor E-stops aren't checked. After 10 failures in a row it posts a warning to Slack.
 - **Nothing in the log for hours** → normal; it only writes when something happens. Check the task State is *Running*.
 
 ---

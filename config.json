@@ -21,5 +21,8 @@
                     },
   "Heartbeat": {
     "PingUrl": "https://hc-ping.com/398b39ae-67f1-4374-bd30-a426c537a764"
+  },
+  "SystemStopWatch": {
+    "Enabled": true
   }
 }

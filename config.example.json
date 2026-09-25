@@ -21,5 +21,8 @@
                     },
     "Heartbeat":  {
                       "PingUrl":  "https://hc-ping.com/PASTE_CHECK_UUID"
-                  }
+                  },
+  "SystemStopWatch": {
+    "Enabled": true
+  }
 }
