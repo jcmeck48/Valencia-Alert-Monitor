@@ -177,7 +177,6 @@ function New-MapSnapshot([string]$outFile) { Save-RmsMapScreenshot $script:Brows
 # ---------------------------------------------------------------------------
 $script:stopSince      = $null
 $script:stateFailCount = 0
-$script:stateWarnSent  = $false
 $script:lastStateTry   = $null
 
 function Watch-SystemStop($alerted, $open, [datetime]$now) {
@@ -191,17 +190,24 @@ function Watch-SystemStop($alerted, $open, [datetime]$now) {
         $script:stateFailCount++
         Write-Log "System-state check failed ($($script:stateFailCount)): $($_.Exception.Message)"
         try { Stop-RmsBrowser } catch {}
-        if ($script:stateFailCount -ge $cfg.OfflineAlertAfterFailures -and -not $script:stateWarnSent) {
+        # The warning is saved in the state file, so the all-clear still goes out after a restart
+        if ($script:stateFailCount -ge $cfg.OfflineAlertAfterFailures -and -not $alerted.ContainsKey('statewarn')) {
             try {
                 Send-Slack ":warning: Alarm monitor for $($cfg.SiteName) cannot read the RMS system state - *floor E-stops are NOT being checked* (RMS alarm alerts still work). Last error: $($_.Exception.Message)"
-                $script:stateWarnSent = $true
+                $alerted['statewarn'] = [pscustomobject]@{ started = (Get-EpochMs $now); what = 'System-state check failing'; obj = 'monitor' }
+                Save-State $alerted
+                Write-Log 'Slack warning sent: floor E-stops not being checked'
             } catch { Write-Log "Slack send failed: $($_.Exception.Message)" }
         }
         return
     }
-    if ($script:stateWarnSent) {
-        try { Send-Slack ":large_green_circle: Alarm monitor for $($cfg.SiteName) can read the RMS system state again - floor E-stops are being checked." } catch {}
-        $script:stateWarnSent = $false
+    if ($alerted.ContainsKey('statewarn')) {
+        try {
+            Send-Slack ":large_green_circle: Alarm monitor for $($cfg.SiteName) can read the RMS system state again - floor E-stops are being checked."
+            $alerted.Remove('statewarn')
+            Save-State $alerted
+            Write-Log 'Slack all-clear sent: floor E-stops being checked again'
+        } catch { Write-Log "Slack send failed: $($_.Exception.Message)" }
     }
     $script:stateFailCount = 0
 
@@ -333,7 +339,7 @@ while ($true) {
 
         # Anything we alerted on that is no longer unprocessed -> resolved
         foreach ($id in @($alerted.Keys)) {
-            if ($id -eq 'sysstop' -or $openIds.ContainsKey($id)) { continue }   # sysstop is handled by Watch-SystemStop
+            if ($id -in 'sysstop', 'statewarn' -or $openIds.ContainsKey($id)) { continue }   # handled by Watch-SystemStop
             $info     = $alerted[$id]
             $started  = ConvertFrom-EpochMs $info.started
             $finished = $null
